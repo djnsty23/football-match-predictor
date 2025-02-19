@@ -1,5 +1,134 @@
 # Football Match Predictor
 
+An advanced machine learning system for predicting football match outcomes and providing betting recommendations.
+
+## Features
+
+- Multiple ML models (Random Forest, Logistic Regression, Naive Bayes)
+- Ensemble predictions with dynamic weighting
+- Detailed team trend analysis
+- Head-to-head statistics
+- Comprehensive risk assessment
+- Dynamic odds adjustment
+- Kelly Criterion stake sizing
+- Form and momentum tracking
+
+## Requirements
+
+- Python 3.x
+- Required packages:
+  - pandas
+  - numpy
+  - scikit-learn
+  - joblib
+
+## Project Structure
+
+```
+/football-match-predictor/
+├── data/
+│   ├── english-premier-league_zip/
+│   ├── spanish-la-liga_zip/
+│   ├── french-ligue-1_zip/
+│   ├── german-bundesliga_zip/
+│   └── italian-serie-a_zip/
+├── exportedModels/
+│   ├── lr_classifier_enhanced.model
+│   ├── nb_classifier_enhanced.model
+│   ├── rf_classifier_enhanced.model
+│   ├── feature_scaler.model
+│   ├── metaData_enhanced.json
+│   └── team_stats.json
+├── predict_enhanced.py
+├── feature_engineering.py
+└── train_enhanced.py
+```
+
+## Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/djnsty23/football-match-predictor.git
+cd football-match-predictor
+```
+
+2. Install required packages:
+```bash
+pip install pandas numpy scikit-learn joblib
+```
+
+3. Ensure you have the required data folders and model files in place.
+
+## Usage
+
+Run the predictor:
+```bash
+python predict_enhanced.py
+```
+
+The system will provide:
+- Match details and statistics
+- Team form analysis
+- Head-to-head statistics
+- Model predictions with confidence levels
+- Betting recommendations with risk assessment
+- Stake sizing suggestions
+
+## Output Explanation
+
+1. Match Details:
+- League and teams
+- Half-time score
+- Shots and shots on target
+- Red cards
+
+2. Team Statistics:
+- Win ratios
+- Goals per game
+- Recent form
+- Clean sheet ratios
+- Comeback ratios
+
+3. Head-to-Head Analysis:
+- Previous meetings
+- Historical patterns
+- Scoring patterns
+- Venue importance
+- Dominance scores
+
+4. Model Predictions:
+- Individual model predictions with confidence
+- Ensemble prediction with weighted probabilities
+- Overall confidence level
+
+5. Betting Analysis:
+- Odds analysis
+- Value assessment
+- Risk evaluation
+- Stake recommendations
+- Kelly Criterion calculations
+
+## Customization
+
+You can modify various parameters in the code:
+- Bankroll amount (default: $1000)
+- Risk thresholds
+- Kelly Criterion fractions
+- Trend analysis weights
+- Historical data penalties
+
+## Contributing
+
+Feel free to submit issues, fork the repository, and create pull requests for any improvements.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Disclaimer
+
+This tool is for educational purposes only. Betting involves risk, and past performance does not guarantee future results. Always gamble responsibly.
+
 ## Overview
 
 This project uses Machine Learning to predict the outcome of a football match when given some stats from half time.
@@ -86,7 +215,7 @@ This is a common problem in applied machine learning where you have to determine
 
 In the case of classification problems where input variables are also categorical, we can use statistical tests to determine whether the output variable is dependent or independent of the input variables. If independent, then the input variable is a candidate for a feature that may be irrelevant to the problem and can possibly be removed from the dataset.
 
-One such test is the <a href="https://machinelearningmastery.com/chi-squared-test-for-machine-learning/">Pearson’s Chi-Squared statistical hypothesis</a>. This was the result from the Chi-Squared Analysis:
+One such test is the <a href="https://machinelearningmastery.com/chi-squared-test-for-machine-learning/">Pearson's Chi-Squared statistical hypothesis</a>. This was the result from the Chi-Squared Analysis:
 
 <pre>
 HC is NOT an important predictor
@@ -142,7 +271,7 @@ Since I'm using Python for this project. It is very easy to test multiple models
 
 For this project, I selected the following 3 models:
 - Naive Bayes:
-  - This is based on the famous <a href="https://en.wikipedia.org/wiki/Bayes%27_theorem">Bayes’ Theorem</a> which gives the probability of an event occuring given the probability of another event that has already occured.
+  - This is based on the famous <a href="https://en.wikipedia.org/wiki/Bayes%27_theorem">Bayes' Theorem</a> which gives the probability of an event occuring given the probability of another event that has already occured.
   - The *naive* assumption that is made in this particular classifier is that all the features are •independent* of each other. This makes it easy to make the prediction, but that is exactly why the predictions are quite naive.
   - But in practice, there are quite a few real-world use cases of this type of classifier, namely document classification and spam-filtering among many others.
 - Random Forest
