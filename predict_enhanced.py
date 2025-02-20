@@ -5,21 +5,34 @@ import pandas as pd
 from os import path
 import random
 from feature_engineering import add_features_to_match, load_all_data
+from model_adjustment import ModelAdjuster
 
 def load_models():
-    # Load the enhanced models and metadata
-    lr_classifier = load('exportedModels/lr_classifier_enhanced.model')
-    nb_classifier = load('exportedModels/nb_classifier_enhanced.model')
-    rf_classifier = load('exportedModels/rf_classifier_enhanced.model')
-    scaler = load('exportedModels/feature_scaler.model')
-    
-    with open('exportedModels/metaData_enhanced.json', 'r') as f:
-        metadata = json.load(f)
+    """Load all required models and metadata"""
+    try:
+        # Load the models
+        lr_classifier = load('exportedModels/lr_classifier_enhanced.model')
+        nb_classifier = load('exportedModels/nb_classifier_enhanced.model')
+        rf_classifier = load('exportedModels/rf_classifier_enhanced.model')
+        scaler = load('exportedModels/feature_scaler.model')
         
-    with open('exportedModels/team_stats.json', 'r') as f:
-        team_stats = json.load(f)
-    
-    return lr_classifier, nb_classifier, rf_classifier, scaler, metadata, team_stats
+        # Load metadata
+        with open('exportedModels/metadata_enhanced.json', 'r') as f:
+            metadata = json.load(f)
+            
+        # Load team stats if available
+        team_stats = {}
+        if path.exists('exportedModels/team_stats.json'):
+            with open('exportedModels/team_stats.json', 'r') as f:
+                team_stats = json.load(f)
+        
+        # Initialize model adjuster
+        model_adjuster = ModelAdjuster()
+        
+        return lr_classifier, nb_classifier, rf_classifier, scaler, metadata, team_stats, model_adjuster
+    except Exception as e:
+        print(f"Error loading models: {str(e)}")
+        raise
 
 def load_match_data():
     # Load all data for head-to-head and form calculations
@@ -111,26 +124,67 @@ def calculate_value_bet(odds, prob):
     value = (prob * (1 + odds/100)) - 1 if odds > 0 else (prob * (1 + 100/abs(odds))) - 1
     return value, implied_prob
 
-def get_ensemble_prediction(lr_pred, nb_pred, rf_pred, lr_proba, nb_proba, rf_proba):
-    """
-    Get ensemble prediction using dynamic weighted voting and confidence scores.
-    """
-    # Get dynamic weights based on model confidence
-    weights = get_dynamic_weights(lr_proba, nb_proba, rf_proba)
+def get_ensemble_prediction(lr_pred, nb_pred, rf_pred, lr_proba, nb_proba, rf_proba, model_adjuster=None):
+    """Get ensemble prediction with dynamic weights"""
+    # Default weights if no adjuster provided
+    weights = {
+        'lr': 0.35,
+        'nb': 0.25,
+        'rf': 0.40
+    }
     
-    # Calculate weighted probabilities for each outcome
-    ensemble_proba = np.zeros(3)
-    for i in range(3):
-        ensemble_proba[i] = (
-            weights['rf'] * rf_proba[i] +
-            weights['lr'] * lr_proba[i] +
-            weights['nb'] * nb_proba[i]
-        )
+    # Get adjusted weights if available
+    if model_adjuster:
+        weights = model_adjuster.adjust_model_weights(weights)
     
-    # Normalize probabilities
-    ensemble_proba = ensemble_proba / ensemble_proba.sum()
+    # Ensure probabilities are 1D arrays of length 3
+    def process_proba(proba, model_name):
+        proba = np.array(proba)
+        if len(proba.shape) == 2:
+            if proba.shape[1] == 3:  # Shape is (n, 3)
+                proba = proba[0]  # Take first row since we only have one sample
+            elif proba.shape[0] == 3:  # Shape is (3, n)
+                proba = proba[:, 0]  # Take first column
+        elif len(proba.shape) == 1:
+            if proba.shape[0] != 3:
+                print(f"Warning: Invalid {model_name} probability shape {proba.shape}, using default")
+                proba = np.array([1/3, 1/3, 1/3])
+        else:
+            print(f"Warning: Invalid {model_name} probability shape {proba.shape}, using default")
+            proba = np.array([1/3, 1/3, 1/3])
+        
+        # Normalize probabilities
+        sum_proba = np.sum(proba)
+        if sum_proba > 0:
+            proba = proba / sum_proba
+        else:
+            proba = np.array([1/3, 1/3, 1/3])
+        
+        # Ensure the array is 2D with shape (3,1) for broadcasting
+        return proba.reshape(3, 1)
     
-    # Get ensemble prediction (most likely outcome)
+    # Process probabilities
+    lr_proba = process_proba(lr_proba, 'LR')
+    nb_proba = process_proba(nb_proba, 'NB')
+    rf_proba = process_proba(rf_proba, 'RF')
+    
+    # Calculate weighted probabilities
+    ensemble_proba = np.zeros((3, 1))  # Initialize array for weighted probabilities
+    ensemble_proba += weights['lr'] * lr_proba
+    ensemble_proba += weights['nb'] * nb_proba
+    ensemble_proba += weights['rf'] * rf_proba
+    
+    # Convert back to 1D array
+    ensemble_proba = ensemble_proba.flatten()
+    
+    # Normalize ensemble probabilities
+    sum_proba = np.sum(ensemble_proba)
+    if sum_proba > 0:
+        ensemble_proba = ensemble_proba / sum_proba
+    else:
+        ensemble_proba = np.array([1/3, 1/3, 1/3])
+    
+    # Get prediction (index of highest probability)
     outcomes = ['H', 'D', 'A']
     ensemble_pred = outcomes[np.argmax(ensemble_proba)]
     
@@ -603,367 +657,128 @@ def get_betting_recommendation(ensemble_proba, confidence, bankroll=1000, additi
         return []
 
 def predict_match_result(match_data, all_data, models):
-    lr_classifier, nb_classifier, rf_classifier, scaler, metadata, team_stats = models
+    lr_classifier, nb_classifier, rf_classifier, scaler, metadata, team_stats, model_adjuster = models
     
     home_team = match_data['HomeTeam']
     away_team = match_data['AwayTeam']
     
     # Get team encodings from metadata
-    home_encoded = metadata['home_teams'].get(home_team)
-    away_encoded = metadata['away_teams'].get(away_team)
+    team_names = metadata.get('team_names', [])
     
-    if home_encoded is None or away_encoded is None:
-        print(f"Error: Team(s) not found in training data")
-        print(f"Available home teams: {list(metadata['home_teams'].keys())}")
-        print(f"Available away teams: {list(metadata['away_teams'].keys())}")
+    if not team_names:
+        print("Error: No team names found in metadata")
         return None
+        
+    if home_team not in team_names or away_team not in team_names:
+        print("Warning: Team(s) not found in training data")
+        print(f"Home team '{home_team}' in training data: {home_team in team_names}")
+        print(f"Away team '{away_team}' in training data: {away_team in team_names}")
+        return None
+    
+    # Get team encodings
+    try:
+        home_encoded = team_names.index(home_team)
+        away_encoded = team_names.index(away_team)
+    except ValueError as e:
+        print(f"Error encoding teams: {str(e)}")
+        return None
+    
+    # Initialize default values for required fields
+    for field in ['HTHG', 'HTAG', 'HS', 'AS', 'HST', 'AST', 'HR', 'AR']:
+        if field not in match_data or pd.isna(match_data[field]):
+            match_data[field] = 0
     
     # Get additional features
     additional_features = add_features_to_match(match_data, team_stats, all_data)
     
-    # Add recent results tracking
-    home_recent_results = []
-    home_recent_goals = []
-    home_recent_conceded = []
-    away_recent_results = []
-    away_recent_goals = []
-    away_recent_conceded = []
+    # Create feature dictionary with all features initialized to 0
+    feature_dict = {feature: 0.0 for feature in metadata['features']}
     
-    # Get last 5 matches for each team
-    recent_matches = all_data[
-        ((all_data['HomeTeam'] == home_team) | (all_data['AwayTeam'] == home_team) |
-         (all_data['HomeTeam'] == away_team) | (all_data['AwayTeam'] == away_team)) &
-        (all_data['Date'] < match_data['Date'])
-    ].sort_values('Date', ascending=False).head(10)  # Get 10 to ensure we have 5 for each team
-    
-    # Process home team recent matches
-    home_matches = recent_matches[
-        (recent_matches['HomeTeam'] == home_team) |
-        (recent_matches['AwayTeam'] == home_team)
-    ].head(5)
-    
-    for _, match in home_matches.iterrows():
-        if match['HomeTeam'] == home_team:
-            result = 'W' if match['FTR'] == 'H' else 'D' if match['FTR'] == 'D' else 'L'
-            goals_scored = match['FTHG']
-            goals_conceded = match['FTAG']
-        else:
-            result = 'W' if match['FTR'] == 'A' else 'D' if match['FTR'] == 'D' else 'L'
-            goals_scored = match['FTAG']
-            goals_conceded = match['FTHG']
-        
-        home_recent_results.append(result)
-        home_recent_goals.append(goals_scored)
-        home_recent_conceded.append(goals_conceded)
-    
-    # Process away team recent matches
-    away_matches = recent_matches[
-        (recent_matches['HomeTeam'] == away_team) |
-        (recent_matches['AwayTeam'] == away_team)
-    ].head(5)
-    
-    for _, match in away_matches.iterrows():
-        if match['HomeTeam'] == away_team:
-            result = 'W' if match['FTR'] == 'H' else 'D' if match['FTR'] == 'D' else 'L'
-            goals_scored = match['FTHG']
-            goals_conceded = match['FTAG']
-        else:
-            result = 'W' if match['FTR'] == 'A' else 'D' if match['FTR'] == 'D' else 'L'
-            goals_scored = match['FTAG']
-            goals_conceded = match['FTHG']
-        
-        away_recent_results.append(result)
-        away_recent_goals.append(goals_scored)
-        away_recent_conceded.append(goals_conceded)
-    
-    # Add recent form to additional features
-    additional_features['home_recent_results'] = home_recent_results
-    additional_features['home_recent_goals'] = home_recent_goals
-    additional_features['home_recent_conceded'] = home_recent_conceded
-    additional_features['away_recent_results'] = away_recent_results
-    additional_features['away_recent_goals'] = away_recent_goals
-    additional_features['away_recent_conceded'] = away_recent_conceded
-    
-    # Calculate league positions (if available)
-    try:
-        league_table = all_data[all_data['Div'] == match_data['Div']].copy()
-        league_table['Points'] = league_table.apply(
-            lambda x: 3 if x['FTR'] == 'H' else 1 if x['FTR'] == 'D' else 0, axis=1
-        )
-        team_points = league_table.groupby('HomeTeam')['Points'].sum()
-        positions = team_points.rank(ascending=False, method='min')
-        home_pos = positions.get(home_team, 0)
-        away_pos = positions.get(away_team, 0)
-        additional_features['league_position_diff'] = home_pos - away_pos
-    except Exception as e:
-        print(f"Warning: Could not calculate league positions - {str(e)}")
-        additional_features['league_position_diff'] = 0
-    
-    # Create feature dictionary with proper names
-    feature_dict = {
+    # Update with basic match features
+    basic_features = {
         'home_encoded': home_encoded,
         'away_encoded': away_encoded,
-        'HTHG': match_data['HTHG'],
-        'HTAG': match_data['HTAG'],
-        'HS': match_data['HS'],
-        'AS': match_data['AS'],
-        'HST': match_data['HST'],
-        'AST': match_data['AST'],
-        'HR': match_data['HR'],
-        'AR': match_data['AR'],
-        # Team features
-        'home_win_ratio': additional_features['home_win_ratio'],
-        'away_win_ratio': additional_features['away_win_ratio'],
-        'home_team_home_win_ratio': additional_features['home_team_home_win_ratio'],
-        'away_team_away_win_ratio': additional_features['away_team_away_win_ratio'],
-        'home_goals_per_game': additional_features['home_goals_per_game'],
-        'away_goals_per_game': additional_features['away_goals_per_game'],
-        'home_comeback_ratio': additional_features['home_comeback_ratio'],
-        'away_comeback_ratio': additional_features['away_comeback_ratio'],
-        'home_second_half_goal_ratio': additional_features['home_second_half_goal_ratio'],
-        'away_second_half_goal_ratio': additional_features['away_second_half_goal_ratio'],
-        'home_clean_sheet_ratio': additional_features['home_clean_sheet_ratio'],
-        'away_clean_sheet_ratio': additional_features['away_clean_sheet_ratio'],
-        'home_scoring_ratio': additional_features['home_scoring_ratio'],
-        'away_scoring_ratio': additional_features['away_scoring_ratio'],
-        # Head-to-head features
-        'h2h_matches_played': additional_features['h2h_matches_played'],
-        'h2h_home_win_ratio': additional_features['h2h_home_win_ratio'],
-        'h2h_away_win_ratio': additional_features['h2h_away_win_ratio'],
-        'h2h_home_goals_per_game': additional_features['h2h_home_goals_per_game'],
-        'h2h_away_goals_per_game': additional_features['h2h_away_goals_per_game'],
-        # Form features
-        'home_recent_win_ratio': additional_features['home_recent_win_ratio'],
-        'away_recent_win_ratio': additional_features['away_recent_win_ratio'],
-        'home_recent_goals_per_game': additional_features['home_recent_goals_per_game'],
-        'away_recent_goals_per_game': additional_features['away_recent_goals_per_game'],
-        'home_recent_clean_sheet_ratio': additional_features['home_recent_clean_sheet_ratio'],
-        'away_recent_clean_sheet_ratio': additional_features['away_recent_clean_sheet_ratio']
+        'HTHG': float(match_data['HTHG']),
+        'HTAG': float(match_data['HTAG']),
+        'HS': float(match_data['HS']),
+        'AS': float(match_data['AS']),
+        'HST': float(match_data['HST']),
+        'AST': float(match_data['AST']),
+        'HR': float(match_data['HR']),
+        'AR': float(match_data['AR'])
     }
+    feature_dict.update(basic_features)
+    
+    # Add additional features that exist in metadata['features']
+    for key, value in additional_features.items():
+        if key in metadata['features']:
+            feature_dict[key] = float(value) if pd.notnull(value) else 0.0
     
     # Create DataFrame with features in the correct order
-    feature_names = metadata['features']
-    X = pd.DataFrame([feature_dict], columns=feature_names)
+    X = pd.DataFrame([feature_dict])
     
-    # Replace any NaN values with 0
-    X = X.fillna(0)
+    # Ensure we only use features that were used in training
+    X = X[metadata['features']]
     
     # Scale features
     X_scaled = scaler.transform(X)
-    X_scaled = pd.DataFrame(X_scaled, columns=feature_names)
     
-    # Get predictions from all models
+    # Get predictions from each model
     lr_pred = lr_classifier.predict(X_scaled)[0]
     nb_pred = nb_classifier.predict(X_scaled)[0]
     rf_pred = rf_classifier.predict(X_scaled)[0]
     
-    # Get prediction probabilities
-    lr_proba = lr_classifier.predict_proba(X_scaled)[0]
-    nb_proba = nb_classifier.predict_proba(X_scaled)[0]
-    rf_proba = rf_classifier.predict_proba(X_scaled)[0]
+    # Get raw probabilities
+    lr_proba = lr_classifier.predict_proba(X_scaled)
+    nb_proba = nb_classifier.predict_proba(X_scaled)
+    rf_proba = rf_classifier.predict_proba(X_scaled)
+    
+    print("Raw probability shapes:")
+    print(f"LR: {lr_proba.shape}")
+    print(f"NB: {nb_proba.shape}")
+    print(f"RF: {rf_proba.shape}")
     
     # Get ensemble prediction with dynamic weights
     ensemble_pred, ensemble_proba, weights = get_ensemble_prediction(
         lr_pred, nb_pred, rf_pred,
-        lr_proba, nb_proba, rf_proba
+        lr_proba, nb_proba, rf_proba,
+        model_adjuster
     )
     
-    # Get team trends
-    home_trend = analyze_team_trend(
-        recent_results=home_recent_results,
-        recent_goals_scored=home_recent_goals,
-        recent_goals_conceded=home_recent_conceded
-    )
+    # Calculate confidence scores
+    lr_confidence = get_prediction_confidence(lr_proba[0])
+    nb_confidence = get_prediction_confidence(nb_proba[0])
+    rf_confidence = get_prediction_confidence(rf_proba[0])
+    ensemble_confidence = get_prediction_confidence(ensemble_proba)
     
-    away_trend = analyze_team_trend(
-        recent_results=away_recent_results,
-        recent_goals_scored=away_recent_goals,
-        recent_goals_conceded=away_recent_conceded
-    )
+    # Record prediction for future adjustments if actual result is available
+    if 'FTR' in match_data:
+        predictions = {
+            'lr_pred': lr_pred,
+            'nb_pred': nb_pred,
+            'rf_pred': rf_pred,
+            'ensemble_pred': ensemble_pred,
+            'lr_proba': lr_proba[0],
+            'nb_proba': nb_proba[0],
+            'rf_proba': rf_proba[0],
+            'ensemble_proba': ensemble_proba,
+            'lr_confidence': lr_confidence,
+            'nb_confidence': nb_confidence,
+            'rf_confidence': rf_confidence,
+            'ensemble_confidence': ensemble_confidence
+        }
     
-    # Calculate confidence with historical data penalties
-    lr_confidence = get_prediction_confidence(
-        lr_proba,
-        h2h_matches=additional_features['h2h_matches_played'],
-        recent_form_matches=len(home_recent_results)
-    )
-    nb_confidence = get_prediction_confidence(
-        nb_proba,
-        h2h_matches=additional_features['h2h_matches_played'],
-        recent_form_matches=len(home_recent_results)
-    )
-    rf_confidence = get_prediction_confidence(
-        rf_proba,
-        h2h_matches=additional_features['h2h_matches_played'],
-        recent_form_matches=len(home_recent_results)
-    )
-    ensemble_confidence = get_prediction_confidence(
-        ensemble_proba,
-        h2h_matches=additional_features['h2h_matches_played'],
-        recent_form_matches=len(home_recent_results)
-    )
-    
-    # Adjust odds based on trends and other factors
-    base_odds = {
-        'Home': 200,
-        'Draw': 250,
-        'Away': 150
+    return {
+        'ensemble_pred': ensemble_pred,
+        'ensemble_proba': ensemble_proba.tolist(),
+        'ensemble_confidence': ensemble_confidence,
+        'model_weights': weights,
+        'individual_predictions': {
+            'lr': {'pred': lr_pred, 'proba': lr_proba[0].tolist(), 'confidence': lr_confidence},
+            'nb': {'pred': nb_pred, 'proba': nb_proba[0].tolist(), 'confidence': nb_confidence},
+            'rf': {'pred': rf_pred, 'proba': rf_proba[0].tolist(), 'confidence': rf_confidence}
+        }
     }
-    
-    adjusted_odds = {
-        'Home': adjust_odds_dynamically(
-            base_odds['Home'],
-            team_trend=home_trend,
-            league_position_diff=additional_features['league_position_diff']
-        ),
-        'Draw': adjust_odds_dynamically(
-            base_odds['Draw'],
-            team_trend={'trend_strength': 0.5},  # Neutral for draw
-            league_position_diff=0
-        ),
-        'Away': adjust_odds_dynamically(
-            base_odds['Away'],
-            team_trend=away_trend,
-            league_position_diff=-additional_features['league_position_diff']
-        )
-    }
-    
-    # Get detailed head-to-head analysis
-    h2h_stats = analyze_head_to_head(
-        home_team,
-        away_team,
-        all_data,
-        match_data['Date']
-    )
-    
-    # Get betting recommendations with enhanced analysis
-    betting_recommendations = get_betting_recommendation(
-        ensemble_proba,
-        ensemble_confidence,
-        bankroll=1000,
-        additional_features=additional_features,
-        adjusted_odds=adjusted_odds,
-        home_trend=home_trend,
-        away_trend=away_trend,
-        h2h_stats=h2h_stats
-    )
-    
-    print("\nMatch Details:")
-    print("-" * 50)
-    print(f"League: {match_data['Div']}")
-    print(f"{home_team} vs {away_team}")
-    print(f"Half-time score: {int(match_data['HTHG'])} - {int(match_data['HTAG'])}")
-    print(f"Shots (on target): {home_team}: {int(match_data['HS'])} ({int(match_data['HST'])}), {away_team}: {int(match_data['AS'])} ({int(match_data['AST'])})")
-    print(f"Red cards: {home_team}: {int(match_data['HR'])}, {away_team}: {int(match_data['AR'])}")
-    
-    print("\nTeam Statistics:")
-    print("-" * 50)
-    print(f"{home_team}:")
-    print(f"- Overall win ratio: {additional_features['home_win_ratio']:.3f}")
-    print(f"- Home win ratio: {additional_features['home_team_home_win_ratio']:.3f}")
-    print(f"- Goals per game: {additional_features['home_goals_per_game']:.2f}")
-    print(f"- Recent form (wins): {additional_features['home_recent_win_ratio']:.3f}")
-    print(f"- Recent goals per game: {additional_features['home_recent_goals_per_game']:.2f}")
-    print(f"- Clean sheet ratio: {additional_features['home_clean_sheet_ratio']:.3f}")
-    print(f"- Comeback ratio: {additional_features['home_comeback_ratio']:.3f}")
-    
-    print(f"\n{away_team}:")
-    print(f"- Overall win ratio: {additional_features['away_win_ratio']:.3f}")
-    print(f"- Away win ratio: {additional_features['away_team_away_win_ratio']:.3f}")
-    print(f"- Goals per game: {additional_features['away_goals_per_game']:.2f}")
-    print(f"- Recent form (wins): {additional_features['away_recent_win_ratio']:.3f}")
-    print(f"- Recent goals per game: {additional_features['away_recent_goals_per_game']:.2f}")
-    print(f"- Clean sheet ratio: {additional_features['away_clean_sheet_ratio']:.3f}")
-    print(f"- Comeback ratio: {additional_features['away_comeback_ratio']:.3f}")
-    
-    print("\nHead-to-Head Statistics:")
-    print("-" * 50)
-    print(f"Previous meetings: {int(additional_features['h2h_matches_played'])}")
-    if additional_features['h2h_matches_played'] > 0:
-        print(f"{home_team} wins: {additional_features['h2h_home_win_ratio']:.3f}")
-        print(f"{away_team} wins: {additional_features['h2h_away_win_ratio']:.3f}")
-        print(f"Goals per game: {home_team}: {additional_features['h2h_home_goals_per_game']:.2f}, {away_team}: {additional_features['h2h_away_goals_per_game']:.2f}")
-    
-    print(f"\nActual full-time result: {match_data['FTR']} (Score: {int(match_data['FTHG'])} - {int(match_data['FTAG'])})")
-    
-    print("\nModel Predictions:")
-    print("-" * 50)
-    print(f"Random Forest ({weights['rf']:.1%}): {rf_pred} (H: {rf_proba[0]:.2f}, D: {rf_proba[1]:.2f}, A: {rf_proba[2]:.2f}) - Confidence: {rf_confidence:.2f}")
-    print(f"Logistic Regression ({weights['lr']:.1%}): {lr_pred} (H: {lr_proba[0]:.2f}, D: {lr_proba[1]:.2f}, A: {lr_proba[2]:.2f}) - Confidence: {lr_confidence:.2f}")
-    print(f"Naive Bayes ({weights['nb']:.1%}): {nb_pred} (H: {nb_proba[0]:.2f}, D: {nb_proba[1]:.2f}, A: {nb_proba[2]:.2f}) - Confidence: {nb_confidence:.2f}")
-    
-    print("\nEnsemble Prediction:")
-    print("-" * 50)
-    print(f"Final Prediction: {ensemble_pred} (H: {ensemble_proba[0]:.2f}, D: {ensemble_proba[1]:.2f}, A: {ensemble_proba[2]:.2f})")
-    print(f"Overall Confidence: {ensemble_confidence:.2f}")
-    
-    # Refined confidence thresholds with more detailed recommendations
-    if ensemble_confidence > 0.8:
-        print("Confidence Level: Very High")
-        print("Recommendation: Strong bet opportunity with high certainty")
-    elif ensemble_confidence > 0.65:
-        print("Confidence Level: High")
-        print("Recommendation: Good bet opportunity")
-    elif ensemble_confidence > 0.5:
-        print("Confidence Level: Moderate")
-        print("Recommendation: Consider betting with caution")
-    else:
-        print("Confidence Level: Low")
-        print("Recommendation: High uncertainty, avoid betting")
-    
-    print("\nTeam Form Trends:")
-    print("-" * 50)
-    print(f"{home_team}:")
-    print(f"- Form trend: {home_trend['form_trend']}")
-    print(f"- Scoring trend: {home_trend['scoring_trend']}")
-    print(f"- Defensive trend: {home_trend['defensive_trend']}")
-    print(f"- Overall trend strength: {home_trend['trend_strength']:.2f}")
-    
-    print(f"\n{away_team}:")
-    print(f"- Form trend: {away_trend['form_trend']}")
-    print(f"- Scoring trend: {away_trend['scoring_trend']}")
-    print(f"- Defensive trend: {away_trend['defensive_trend']}")
-    print(f"- Overall trend strength: {away_trend['trend_strength']:.2f}")
-    
-    print("\nDetailed Head-to-Head Analysis:")
-    print("-" * 50)
-    if h2h_stats:
-        print(f"Historical Pattern: {h2h_stats['historical_pattern']}")
-        print(f"Scoring Pattern: {h2h_stats['scoring_pattern']}")
-        print(f"Venue Importance: {h2h_stats['venue_importance']:.2f}")
-        print(f"Dominance Score: {h2h_stats['dominance_score']:.2f}")
-    
-    if betting_recommendations:
-        print("\nBetting Analysis:")
-        print("-" * 50)
-        for rec in betting_recommendations:
-            metrics = rec['metrics']
-            risk = rec['risk']
-            
-            print(f"\n{rec['outcome']} - Odds: {rec['odds']:+d}")
-            print(f"Prediction Metrics:")
-            print(f"- Model probability: {rec['probability']:.2%}")
-            print(f"- Implied probability: {metrics['implied_prob']:.2%}")
-            print(f"- True odds (fair value): {(1/rec['probability']-1)*100:+.0f}")
-            
-            print("\nValue Analysis:")
-            print(f"- Edge: {metrics['edge']:+.1f}%")
-            print(f"- Expected value: {metrics['value']:.2f}")
-            print(f"- ROI: {metrics['roi']:+.1f}%")
-            print(f"- Risk/Reward ratio: {metrics['risk_reward_ratio']:.2f}")
-            
-            print("\nStaking Strategy:")
-            print(f"- Risk Level: {risk['level']} ({risk['risk_score']:.2f})")
-            print(f"- {risk['description']}")
-            print(f"- Recommended stake: ${risk['max_stake']:.2f}")
-            print(f"- Potential return: ${metrics['potential_returns']['quarter_kelly']:.2f}")
-            
-            print("\nKelly Criterion Stakes:")
-            print(f"- Conservative (1/4): {metrics['quarter_kelly']:.1%}")
-            print(f"- Moderate (1/2): {metrics['half_kelly']:.1%}")
-            print(f"- Aggressive (full): {metrics['full_kelly']:.1%}")
-    else:
-        print("\nNo valuable betting opportunities found")
 
 def main():
     print("Loading enhanced models...")
